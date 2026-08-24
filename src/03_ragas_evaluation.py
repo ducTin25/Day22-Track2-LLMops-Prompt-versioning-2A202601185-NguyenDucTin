@@ -16,6 +16,7 @@ DELIVERABLE: faithfulness ≥ 0.8 cho ít nhất 1 prompt version
 """
 import sys
 import json
+import shutil
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -223,7 +224,12 @@ def main():
     print("=" * 65)
     for metric in ["faithfulness", "answer_relevancy", "context_recall", "context_precision"]:
         s1, s2  = v1_scores[metric], v2_scores[metric]
-        winner  = "← V1" if s1 > s2 else "← V2"
+        if s1 > s2:
+            winner = "← V1"
+        elif s2 > s1:
+            winner = "← V2"
+        else:
+            winner = "Tie"
         print(f"  {metric:30s}  {s1:>8.4f}  {s2:>8.4f}  {winner}")
 
     # Kiểm tra mục tiêu
@@ -238,6 +244,7 @@ def main():
     report = {
         "prompt_v1_scores": v1_scores,
         "prompt_v2_scores": v2_scores,
+        "samples_per_version": len(QA_PAIRS),
         "target_met": best_faith >= 0.8,
     }
     report_path = Path(__file__).parent.parent / "data" / "ragas_report.json"
@@ -247,6 +254,11 @@ def main():
         encoding="utf-8",
     )
     print(f"💾 Đã lưu báo cáo vào {report_path}")
+
+    evidence_path = report_path.parent.parent / "evidence" / "03_ragas_report.json"
+    evidence_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(report_path, evidence_path)
+    print(f"💾 Đã sao chép bằng chứng vào {evidence_path}")
 
 
 if __name__ == "__main__":

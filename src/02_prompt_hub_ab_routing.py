@@ -12,6 +12,7 @@ DELIVERABLE: 2 prompt version hiển thị trong Prompt Hub trên https://smith.
 """
 import sys
 import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -67,61 +68,82 @@ PROMPT_V2 = ChatPromptTemplate.from_messages([
 
 
 # ── 3. Push Prompts lên Prompt Hub ─────────────────────────────────────────
-def push_prompts_to_hub(client: Client):
+def resolve_hub_prompt_names(client: Client) -> dict:
+    """Return public owner-qualified or private tenant prompt identifiers."""
+    owner = config.LANGSMITH_PROMPT_OWNER
+    if not owner:
+        settings = client._get_settings()
+        owner = (settings.tenant_handle or "").strip()
+    if not owner:
+        # Private prompts belong to the current tenant and do not require a
+        # public Prompt Hub handle.
+        return {"v1": PROMPT_V1_NAME, "v2": PROMPT_V2_NAME}
+    return {
+        "v1": f"{owner}/{PROMPT_V1_NAME}",
+        "v2": f"{owner}/{PROMPT_V2_NAME}",
+    }
+
+
+def push_prompts_to_hub(client: Client, hub_names: dict):
     """
     Upload cả 2 prompt templates lên LangSmith Prompt Hub.
     Gợi ý: client.push_prompt(name, object=template, description="...")
     """
-    # Push V1 while keeping a useful fallback for offline/local runs.
+    pushed_urls = {}
     try:
         url = client.push_prompt(
-            PROMPT_V1_NAME,
+            hub_names["v1"],
             object=PROMPT_V1,
             description="V1 - trợ lý thân thiện, trả lời ngắn gọn và grounded",
         )
+        pushed_urls["v1"] = url
         print(f"✅ Đã push V1 → {url}")
-    except Exception as e:
-        print(f"⚠️  V1 lỗi: {e}")
+    except Exception as exc:
+        raise RuntimeError(
+            f"Không thể push '{hub_names['v1']}' lên Prompt Hub: {exc}"
+        ) from exc
 
-    # Push V2 while keeping a useful fallback for offline/local runs.
     try:
         url = client.push_prompt(
-            PROMPT_V2_NAME,
+            hub_names["v2"],
             object=PROMPT_V2,
             description="V2 - chuyên gia phân tích, trả lời có cấu trúc",
         )
+        pushed_urls["v2"] = url
         print(f"✅ Đã push V2 → {url}")
-    except Exception as e:
-        print(f"⚠️  V2 lỗi: {e}")
+    except Exception as exc:
+        raise RuntimeError(
+            f"Không thể push '{hub_names['v2']}' lên Prompt Hub: {exc}"
+        ) from exc
+
+    return pushed_urls
 
 
 # ── 4. Pull Prompts từ Prompt Hub ──────────────────────────────────────────
-def pull_prompts_from_hub(client: Client) -> dict:
+def pull_prompts_from_hub(client: Client, hub_names: dict) -> dict:
     """
     Tải 2 prompt từ LangSmith Prompt Hub.
-    Fallback về template local nếu Hub không khả dụng.
-
     Gợi ý: client.pull_prompt(name) → ChatPromptTemplate
 
     Trả về: {name: ChatPromptTemplate}
     """
     prompts = {}
 
-    # Pull V1; fall back only when the Hub is unavailable.
     try:
-        prompts[PROMPT_V1_NAME] = client.pull_prompt(PROMPT_V1_NAME)
-        print(f"↓ Đã pull '{PROMPT_V1_NAME}' từ Hub")
-    except Exception:
-        prompts[PROMPT_V1_NAME] = PROMPT_V1
-        print(f"ℹ️  Dùng local fallback cho '{PROMPT_V1_NAME}'")
+        prompts[PROMPT_V1_NAME] = client.pull_prompt(hub_names["v1"])
+        print(f"↓ Đã pull '{hub_names['v1']}' từ Hub")
+    except Exception as exc:
+        raise RuntimeError(
+            f"Không thể pull '{hub_names['v1']}' từ Prompt Hub: {exc}"
+        ) from exc
 
-    # Pull V2; fall back only when the Hub is unavailable.
     try:
-        prompts[PROMPT_V2_NAME] = client.pull_prompt(PROMPT_V2_NAME)
-        print(f"↓ Đã pull '{PROMPT_V2_NAME}' từ Hub")
-    except Exception:
-        prompts[PROMPT_V2_NAME] = PROMPT_V2
-        print(f"ℹ️  Dùng local fallback cho '{PROMPT_V2_NAME}'")
+        prompts[PROMPT_V2_NAME] = client.pull_prompt(hub_names["v2"])
+        print(f"↓ Đã pull '{hub_names['v2']}' từ Hub")
+    except Exception as exc:
+        raise RuntimeError(
+            f"Không thể pull '{hub_names['v2']}' từ Prompt Hub: {exc}"
+        ) from exc
 
     return prompts
 
@@ -190,9 +212,15 @@ def main():
 
     client = Client(api_key=config.LANGSMITH_API_KEY)
 
-    push_prompts_to_hub(client)
+    hub_names = resolve_hub_prompt_names(client)
+    if "/" in hub_names["v1"]:
+        print(f"📦 Prompt Hub owner: {hub_names['v1'].split('/', 1)[0]}")
+    else:
+        print("📦 Prompt Hub scope: private workspace")
 
-    prompts = pull_prompts_from_hub(client)
+    push_prompts_to_hub(client, hub_names)
+
+    prompts = pull_prompts_from_hub(client, hub_names)
 
     # Tạo vectorstore, retriever và LLM
     vectorstore = setup_vectorstore()
@@ -201,6 +229,8 @@ def main():
 
     # Chạy A/B routing cho tất cả câu hỏi
     v1_count, v2_count = 0, 0
+    routing_log = ["A/B Routing Log", "=" * 60]
+    trace_started_at = datetime.now(timezone.utc)
     for i, question in enumerate(SAMPLE_QUESTIONS):
         request_id  = f"req-{i:04d}"
 
@@ -208,15 +238,55 @@ def main():
         version_tag = "v1" if version_key == PROMPT_V1_NAME else "v2"
         prompt      = prompts[version_key]
 
-        result = ask_ab(retriever, llm, prompt, question, version_tag)
+        result = ask_ab(
+            retriever,
+            llm,
+            prompt,
+            question,
+            version_tag,
+            langsmith_extra={
+                "client": client,
+                "project_name": config.LANGSMITH_PROJECT,
+            },
+        )
 
         if version_tag == "v1":
             v1_count += 1
         else:
             v2_count += 1
-        print(f"[{i+1:02d}] [prompt-{version_tag}] {question[:55]}...")
+        log_line = f"[{i+1:02d}] [prompt-{version_tag}] {question[:55]}..."
+        print(log_line)
+        routing_log.append(log_line)
 
-    print(f"\n📊 Routing: V1={v1_count} câu | V2={v2_count} câu | Tổng={len(SAMPLE_QUESTIONS)}")
+    summary = (
+        f"Routing: V1={v1_count} câu | V2={v2_count} câu | "
+        f"Tổng={len(SAMPLE_QUESTIONS)}"
+    )
+    print(f"\n📊 {summary}")
+    routing_log.append(summary)
+
+    evidence_path = (
+        Path(__file__).parent.parent / "evidence" / "02_ab_routing_log.txt"
+    )
+    evidence_path.parent.mkdir(parents=True, exist_ok=True)
+    evidence_path.write_text("\n".join(routing_log) + "\n", encoding="utf-8")
+    print(f"💾 Đã lưu log bằng chứng vào {evidence_path}")
+
+    client.flush(timeout=30)
+    trace_count = sum(
+        1
+        for _ in client.list_runs(
+            project_name=config.LANGSMITH_PROJECT,
+            is_root=True,
+            start_time=trace_started_at,
+            limit=len(SAMPLE_QUESTIONS),
+        )
+    )
+    if trace_count < len(SAMPLE_QUESTIONS):
+        raise RuntimeError(
+            f"LangSmith chỉ xác nhận {trace_count}/{len(SAMPLE_QUESTIONS)} A/B traces."
+        )
+    print(f"✅ LangSmith đã xác nhận {trace_count} A/B traces.")
     print("✅ Bước 2 hoàn thành! Kiểm tra Prompt Hub và traces trên LangSmith.")
 
 

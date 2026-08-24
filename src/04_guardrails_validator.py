@@ -25,18 +25,54 @@ CÁC KHÁI NIỆM CHÍNH:
 
 import re
 import json
+import os
 import sys
+from contextlib import redirect_stdout
+from io import StringIO
+from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
+# Disable Guardrails' anonymous OTLP export before importing the package. The
+# validators are local and no telemetry is needed for this reproducible demo.
+os.environ.setdefault("OTEL_SDK_DISABLED", "true")
+
 from guardrails import Guard
+from guardrails.settings import settings
 from guardrails.validators import Validator, register_validator, PassResult, FailResult
 
 try:
     from guardrails.hub import OnFailAction
 except ImportError:
     from guardrails.validator_base import OnFailAction
+
+# The lab is fully local and does not need Guardrails usage telemetry.
+settings.rc.enable_metrics = False
+
+
+class _Tee:
+    """Mirror demo output to the terminal and an in-memory evidence buffer."""
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for stream in self.streams:
+            stream.write(data)
+        return len(data)
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
+
+
+def _capture_demo(demo) -> str:
+    """Run a demo while preserving exactly what was printed as evidence."""
+    buffer = StringIO()
+    with redirect_stdout(_Tee(sys.stdout, buffer)):
+        demo()
+    return buffer.getvalue()
 
 
 # ── 1. PII Detector Validator ──────────────────────────────────────────────
@@ -62,7 +98,8 @@ class PIIDetector(Validator):
 
     def validate(self, value: str, metadata: dict):
         """
-        Tìm PII trong value; nếu phát hiện, redact và trả về PassResult với text đã xử lý.
+        Tìm PII trong value; nếu phát hiện, trả về FailResult kèm
+        fix_value đã redact để OnFailAction.FIX áp dụng.
 
         Bước:
           1. Copy value → redacted_text
@@ -70,7 +107,7 @@ class PIIDetector(Validator):
              - Tìm tất cả matches bằng re.findall(pattern, value)
              - Thay thế từng match bằng "[PII_TYPE_REDACTED]" trong redacted_text
              - Ghi lại (pii_type, match) vào found_pii
-          3. Nếu found_pii không rỗng → PassResult(value_override=redacted_text)
+          3. Nếu found_pii không rỗng → FailResult(fix_value=redacted_text)
           4. Nếu không tìm thấy PII → PassResult(value_override=value)
         """
         redacted_text = value
@@ -86,7 +123,6 @@ class PIIDetector(Validator):
                 found_pii.append((pii_type, match))
 
         if found_pii:
-            print(f"  ⚠️  Đã redact {len(found_pii)} PII: {[p[0] for p in found_pii]}")
             return FailResult(
                 error_message=f"Phát hiện PII: {', '.join(p[0] for p in found_pii)}",
                 fix_value=redacted_text,
@@ -162,7 +198,6 @@ class JSONFormatter(Validator):
             repaired_text = self._repair(value)
             parsed = json.loads(repaired_text)
             formatted = json.dumps(parsed, ensure_ascii=False, indent=2)
-            print(f"  🔧 JSON đã được sửa thành công")
             # A repaired value is a validation failure that Guard must fix;
             # this exercises the required OnFailAction.FIX path.
             return FailResult(
@@ -199,8 +234,9 @@ def demo_pii_guard():
 
     for label, text in test_cases:
         result = guard.validate(text)
+        status = "REDACTED" if result.validated_output != text else "PASS"
 
-        print(f"\n[{label}]")
+        print(f"\n[{label}] {status}")
         print(f"  Input:  {text}")
         print(f"  Output: {result.validated_output}")
 
@@ -224,10 +260,16 @@ def demo_json_guard():
     for label, text in test_cases:
         result = guard.validate(text)
 
-        status = "✅ Pass" if result.validation_passed else "🔧 Fixed/Fail"
+        output = str(result.validated_output)
+        if '"error"' in output:
+            status = "SAFE FALLBACK"
+        elif output != text:
+            status = "FIXED"
+        else:
+            status = "PASS"
         print(f"\n[{label}] {status}")
-        print(f"  Input:  {text[:60]}")
-        print(f"  Output: {str(result.validated_output)[:60]}")
+        print(f"  Input:  {text}")
+        print(f"  Output: {output}")
 
 
 # ── 5. Main ────────────────────────────────────────────────────────────────
@@ -236,8 +278,14 @@ def main():
     print("  Bước 4: Guardrails AI Validators")
     print("=" * 55)
 
-    demo_pii_guard()
-    demo_json_guard()
+    pii_log = _capture_demo(demo_pii_guard)
+    json_log = _capture_demo(demo_json_guard)
+
+    evidence_dir = Path(__file__).parent.parent / "evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    (evidence_dir / "04_pii_demo_log.txt").write_text(pii_log, encoding="utf-8")
+    (evidence_dir / "04_json_demo_log.txt").write_text(json_log, encoding="utf-8")
+    print(f"\n💾 Đã cập nhật 2 log bằng chứng trong {evidence_dir}")
 
     print("\n✅ Bước 4 hoàn thành!")
 
