@@ -64,6 +64,8 @@ Mở tệp `.env` và điền các giá trị sau:
 LANGSMITH_API_KEY=lsv2_...
 LANGSMITH_PROJECT=day22-lab
 LANGCHAIN_TRACING_V2=true
+# Chỉ cần nếu Prompt Hub handle không tự nhận diện được
+# LANGSMITH_PROMPT_OWNER=your-prompt-hub-handle
 
 # Chọn một trong các provider bên dưới
 PROVIDER=openai
@@ -129,6 +131,10 @@ Lab/
 │   ├── 03_ragas_report.json
 │   ├── 04_pii_demo_log.txt
 │   └── 04_json_demo_log.txt
+├── scripts/
+│   └── render_ragas_evidence.py       # Render báo cáo RAGAS thành PNG
+├── tests/
+│   └── test_lab.py                    # Kiểm thử offline các yêu cầu rubric
 ├── .env.example                        # Template biến môi trường
 ├── requirements.txt
 ├── README.md
@@ -189,6 +195,24 @@ cd src && python run_all.py
 
 ```bash
 cd src && python run_all.py --step 3
+```
+
+### Kiểm thử offline
+
+Bộ test này không gọi LLM và không gửi trace lên LangSmith:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+Bước 2 tự lưu log A/B routing trong `evidence/`. Sau Bước 3, báo cáo
+RAGAS được lưu ở cả `data/` và `evidence/`. Bước 4 tự cập nhật
+riêng hai log PII và JSON trong `evidence/`.
+
+Để render lại ảnh điểm RAGAS từ báo cáo JSON vừa đo:
+
+```bash
+python scripts/render_ragas_evidence.py
 ```
 
 ---

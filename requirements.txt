@@ -28,3 +28,4 @@ guardrails-ai>=0.5.0
 python-dotenv>=1.0.0
 openai>=1.0.0                    # OpenAI SDK (used by langchain-openai)
 tiktoken>=0.5.0                  # token counting
+Pillow>=10.0.0                   # render RAGAS evidence PNG
