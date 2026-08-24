@@ -26,5 +26,4 @@ env/
 # macOS
 .DS_Store
 
-# Lab outputs (không commit, chỉ nộp evidence/)
-data/ragas_report.json
+# RAGAS report is a required submission artifact and should be committed.
